@@ -1,0 +1,19 @@
+{
+  "name": "bun-qrcode-scanner",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "jimp": "^1.6.0",
+    "qrcode-reader": "^1.0.4"
+  }
+}
