@@ -74,3 +74,5 @@ if (import.meta.main) {
   });
   console.log('Bun server running on http://localhost:3000');
 }
+
+console.log("runtime", process.versions.bun);
