@@ -1,19 +1,29 @@
 {
   "name": "bun-qrcode-scanner",
-  "module": "index.ts",
-  "type": "module",
+  "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "start": "bun run index.ts"
-  },
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
   },
   "dependencies": {
     "jimp": "^1.6.0",
-    "qrcode-reader": "^1.0.4"
+    "next": "14.2.3",
+    "qrcode-reader": "^1.0.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.12.12",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.4.5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
   }
 }
