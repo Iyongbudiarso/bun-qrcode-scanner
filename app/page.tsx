@@ -4,6 +4,7 @@ import { useState, useRef } from 'react';
 
 export default function Home() {
   const [result, setResult] = useState<string | null>(null);
+  const [format, setFormat] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -14,6 +15,7 @@ export default function Home() {
     if (input.files && input.files[0]) {
       setFileName(input.files[0].name);
       setResult(null);
+      setFormat(null);
       setError(null);
     }
   };
@@ -34,6 +36,7 @@ export default function Home() {
         // Trigger change event manually if needed, or just set state
         setFileName(e.dataTransfer.files[0].name);
         setResult(null);
+        setFormat(null);
         setError(null);
       }
     }
@@ -47,6 +50,7 @@ export default function Home() {
     }
 
     setResult(null);
+    setFormat(null);
     setError(null);
     setLoading(true);
 
@@ -65,6 +69,7 @@ export default function Home() {
       }
 
       setResult(data.qrcode);
+      setFormat(data.format);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -74,7 +79,7 @@ export default function Home() {
 
   return (
     <div className="container">
-      <h1>QR Code Scanner</h1>
+      <h1>Barcode Scanner</h1>
 
       <form onSubmit={handleSubmit}>
         <div
@@ -104,7 +109,7 @@ export default function Home() {
         </div>
 
         <button type="submit" className="button" disabled={loading}>
-          {loading ? 'Scanning...' : 'Decode QR Code'}
+          {loading ? 'Scanning...' : 'Decode Barcode'}
         </button>
       </form>
 
@@ -112,7 +117,7 @@ export default function Home() {
 
       {result && (
         <div className="result">
-          <div style={{ fontSize: '0.8rem', opacity: 0.6, marginBottom: '0.5rem' }}>RESULT</div>
+          <div style={{ fontSize: '0.8rem', opacity: 0.6, marginBottom: '0.5rem' }}>RESULT {format ? `(${format})` : ''}</div>
           <code style={{ fontSize: '1.1rem', color: '#4ade80' }}>{result}</code>
         </div>
       )}
