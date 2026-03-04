@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { validateToken } from "@/lib/auth";
 
-export async function getSignature(key: string, data: string) {
+async function getSignature(key: string, data: string) {
   const encoder = new TextEncoder();
   const cryptoKey = await crypto.subtle.importKey(
     "raw",
