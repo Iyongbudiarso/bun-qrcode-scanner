@@ -1,3 +1,4 @@
+import { Jimp } from 'jimp';
 import sharp from 'sharp';
 import { scanGrayBuffer } from '@undecaf/zbar-wasm';
 import {
@@ -16,23 +17,51 @@ export interface ScanResult {
   format: string;
 }
 
-// ─── ZXing Luminance Source (grayscale buffer) ───────────────────────────
+// ─── Phase 1: Jimp + ZXing (original, fast path) ────────────────────────
 
-class GrayLuminanceSource extends LuminanceSource {
-  constructor(private gray: Uint8ClampedArray, w: number, h: number) {
-    super(w, h);
+class JimpLuminanceSource extends LuminanceSource {
+  constructor(private image: any) {
+    super(image.bitmap.width, image.bitmap.height);
   }
 
   getRow(y: number, row?: Uint8ClampedArray): Uint8ClampedArray {
-    const w = this.getWidth();
-    if (!row || row.length < w) row = new Uint8ClampedArray(w);
-    const off = y * w;
-    for (let x = 0; x < w; x++) row[x] = this.gray[off + x];
+    if (y < 0 || y >= this.getHeight()) {
+      throw new Error('Requested row is outside the image: ' + y);
+    }
+    const width = this.getWidth();
+    if (!row || row.length < width) {
+      row = new Uint8ClampedArray(width);
+    }
+    const offset = y * width * 4;
+    const data = this.image.bitmap.data;
+
+    for (let x = 0; x < width; x++) {
+       const pos = offset + (x * 4);
+       const r = data[pos];
+       const g = data[pos + 1];
+       const b = data[pos + 2];
+       // Calculate luminance: (306*R + 601*G + 117*B) >> 10
+       row[x] = (306 * r + 601 * g + 117 * b) >> 10;
+    }
     return row;
   }
 
   getMatrix(): Uint8ClampedArray {
-    return this.gray;
+    const width = this.getWidth();
+    const height = this.getHeight();
+    const matrix = new Uint8ClampedArray(width * height);
+    const data = this.image.bitmap.data;
+    for (let y = 0; y < height; y++) {
+      const offset = y * width * 4;
+      for (let x = 0; x < width; x++) {
+        const pos = offset + (x * 4);
+        const r = data[pos];
+        const g = data[pos + 1];
+        const b = data[pos + 2];
+        matrix[y * width + x] = (306 * r + 601 * g + 117 * b) >> 10;
+      }
+    }
+    return matrix;
   }
 
   invert(): LuminanceSource {
@@ -40,174 +69,276 @@ class GrayLuminanceSource extends LuminanceSource {
   }
 }
 
-// ─── ZXing decode helper ────────────────────────────────────────────────
+/**
+ * Attempts to decode a barcode from a Jimp image using multiple binarizer strategies.
+ * Tries normal and inverted luminance with both HybridBinarizer and GlobalHistogramBinarizer.
+ */
+function tryDecodeImage(img: any, reader: MultiFormatReader, hints: Map<DecodeHintType, any>): any | null {
+  const luminanceSource = new JimpLuminanceSource(img);
 
-const ZXING_FORMATS = [
-  BarcodeFormat.QR_CODE,
-  BarcodeFormat.CODE_128,
-  BarcodeFormat.EAN_13,
-  BarcodeFormat.EAN_8,
-  BarcodeFormat.CODE_39,
-  BarcodeFormat.UPC_A,
-  BarcodeFormat.UPC_E,
-  BarcodeFormat.DATA_MATRIX,
-  BarcodeFormat.AZTEC,
-  BarcodeFormat.PDF_417,
-  BarcodeFormat.ITF,
-];
+  // Try HybridBinarizer (best for most cases)
+  try {
+    const bitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+    return reader.decode(bitmap, hints);
+  } catch (_) {}
 
-function tryZxingDecode(gray: Uint8ClampedArray, w: number, h: number): ScanResult | null {
-  const hints = new Map();
-  hints.set(DecodeHintType.TRY_HARDER, true);
-  hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
+  // Try GlobalHistogramBinarizer (better for low-contrast images)
+  try {
+    const bitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
+    return reader.decode(bitmap, hints);
+  } catch (_) {}
 
-  const reader = new MultiFormatReader();
-  const src = new GrayLuminanceSource(gray, w, h);
+  // Try inverted luminance + HybridBinarizer
+  try {
+    const inverted = luminanceSource.invert();
+    const bitmap = new BinaryBitmap(new HybridBinarizer(inverted));
+    return reader.decode(bitmap, hints);
+  } catch (_) {}
 
-  const strategies = [
-    () => new BinaryBitmap(new HybridBinarizer(src)),
-    () => new BinaryBitmap(new GlobalHistogramBinarizer(src)),
-    () => new BinaryBitmap(new HybridBinarizer(src.invert())),
-    () => new BinaryBitmap(new GlobalHistogramBinarizer(src.invert())),
-  ];
+  // Try inverted luminance + GlobalHistogramBinarizer
+  try {
+    const inverted = luminanceSource.invert();
+    const bitmap = new BinaryBitmap(new GlobalHistogramBinarizer(inverted));
+    return reader.decode(bitmap, hints);
+  } catch (_) {}
 
-  for (const makeBitmap of strategies) {
-    try {
-      const result = reader.decode(makeBitmap(), hints);
-      return {
-        text: result.getText(),
-        format: BarcodeFormat[result.getBarcodeFormat()],
-      };
-    } catch (_) {}
-  }
   return null;
 }
 
-// ─── ZBar decode helper ─────────────────────────────────────────────────
+/**
+ * Creates multiple preprocessed variants of the image for scanning.
+ * Each variant applies different image processing to maximize decode success.
+ */
+function createImageVariants(img: any): Array<{ label: string; image: any }> {
+  const variants: Array<{ label: string; image: any }> = [];
 
-async function tryZbarDecode(gray: Buffer, w: number, h: number): Promise<ScanResult | null> {
-  const results = await scanGrayBuffer(new Uint8Array(gray).buffer, w, h);
-  if (results.length > 0) {
-    return {
-      text: results[0].decode(),
-      format: results[0].typeName,
-    };
+  // Variant 1: Original image (no preprocessing)
+  variants.push({ label: 'original', image: img.clone() });
+
+  // Variant 2: Greyscale (removes color noise)
+  const grey = img.clone().greyscale();
+  variants.push({ label: 'greyscale', image: grey });
+
+  // Variant 3: High contrast (sharpens barcode edges)
+  const highContrast = img.clone().contrast(0.5);
+  variants.push({ label: 'high-contrast', image: highContrast });
+
+  // Variant 4: Greyscale + high contrast combined
+  const greyContrast = img.clone().greyscale().contrast(0.5);
+  variants.push({ label: 'greyscale+contrast', image: greyContrast });
+
+  return variants;
+}
+
+// ─── Phase 2: Sharp + ZBar-WASM fallback ────────────────────────────────
+
+class GrayLuminanceSource extends LuminanceSource {
+  constructor(private gray: Uint8ClampedArray, w: number, h: number) {
+    super(w, h);
   }
-  return null;
-}
-
-// ─── Preprocessing helpers ──────────────────────────────────────────────
-
-/**
- * Convert a sharp pipeline to a single-channel grayscale raw buffer.
- */
-async function toGray(pipeline: sharp.Sharp): Promise<{ data: Buffer; w: number; h: number }> {
-  const { data, info } = await pipeline
-    .greyscale()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-  return { data, w: info.width, h: info.height };
+  getRow(y: number, row?: Uint8ClampedArray): Uint8ClampedArray {
+    const w = this.getWidth();
+    if (!row || row.length < w) row = new Uint8ClampedArray(w);
+    const off = y * w;
+    for (let x = 0; x < w; x++) row[x] = this.gray[off + x];
+    return row;
+  }
+  getMatrix(): Uint8ClampedArray { return this.gray; }
+  invert(): LuminanceSource { return new InvertedLuminanceSource(this); }
 }
 
 /**
- * Try to decode a barcode from a sharp pipeline using both ZBar and ZXing.
+ * Fallback scanner using sharp for preprocessing and ZBar-WASM + ZXing for decoding.
+ * Only called when the primary Jimp + ZXing pipeline fails.
  */
-async function tryDecode(pipeline: sharp.Sharp): Promise<ScanResult | null> {
-  const { data, w, h } = await toGray(pipeline);
-
-  // ZBar is faster and more robust for most barcodes
-  const zbarResult = await tryZbarDecode(data, w, h);
-  if (zbarResult) return zbarResult;
-
-  // Fall back to ZXing
-  const gray = new Uint8ClampedArray(data);
-  return tryZxingDecode(gray, w, h);
-}
-
-// ─── Image variant generators ───────────────────────────────────────────
-
-type PreprocessFn = (s: sharp.Sharp) => sharp.Sharp;
-
-const PREPROCESS_STRATEGIES: Array<{ label: string; fn: PreprocessFn }> = [
-  { label: 'original',       fn: (s) => s },
-  { label: 'normalize',      fn: (s) => s.normalize() },
-  { label: 'sharpen',        fn: (s) => s.sharpen({ sigma: 3 }) },
-  { label: 'norm+sharpen',   fn: (s) => s.normalize().sharpen({ sigma: 3 }) },
-  { label: 'clahe',          fn: (s) => s.clahe({ width: 3, height: 3 }) },
-  { label: 'high-contrast',  fn: (s) => s.linear(2, -128) },
-];
-
-const ROTATIONS = [0, 90, 180, 270];
-
-// ─── Main scan function ─────────────────────────────────────────────────
-
-/**
- * Scans a barcode/QR code from an image buffer.
- *
- * Uses a multi-engine, multi-strategy pipeline to maximize decode success:
- *
- * **Phase 1** – Quick scan (ZBar + ZXing, original image, all rotations)
- * **Phase 2** – Preprocessed variants (normalize, sharpen, CLAHE, contrast) × rotations
- * **Phase 3** – Upscaled image (2×, 3×) × preprocessors × rotations
- *
- * ZBar (via WebAssembly) is tried first as it handles rotated and distorted
- * barcodes better. ZXing is used as a fallback.
- *
- * Short-circuits on the first successful decode.
- */
-export async function scanImage(buffer: Buffer): Promise<ScanResult> {
-  const inputBuf = buffer;
-  const meta = await sharp(inputBuf).metadata();
+async function scanWithSharpFallback(buffer: Buffer): Promise<ScanResult | null> {
+  const meta = await sharp(buffer).metadata();
   const w = meta.width || 576;
 
-  // ── Phase 1: Quick scan with original image + rotations ──
-  for (const deg of ROTATIONS) {
-    const pipeline = sharp(inputBuf);
-    if (deg !== 0) pipeline.rotate(deg);
+  const rotations = [0, 90, 180, 270];
 
-    const result = await tryDecode(pipeline);
-    if (result) {
-      console.log(`[scanner] Decoded (phase 1, ${deg}°): ${result.text}`);
-      return result;
-    }
-  }
+  const preprocessors: Array<{ label: string; fn: (s: sharp.Sharp) => sharp.Sharp }> = [
+    { label: 'original',     fn: (s) => s },
+    { label: 'normalize',    fn: (s) => s.normalize() },
+    { label: 'sharpen',      fn: (s) => s.sharpen({ sigma: 3 }) },
+    { label: 'norm+sharpen', fn: (s) => s.normalize().sharpen({ sigma: 3 }) },
+    { label: 'clahe',        fn: (s) => s.clahe({ width: 3, height: 3 }) },
+    { label: 'high-contrast',fn: (s) => s.linear(2, -128) },
+  ];
 
-  // ── Phase 2: Preprocessed variants × rotations ──
-  // Skip 'original' since Phase 1 already tried it
-  for (const pp of PREPROCESS_STRATEGIES.slice(1)) {
-    for (const deg of ROTATIONS) {
+  const hints = new Map();
+  hints.set(DecodeHintType.TRY_HARDER, true);
+  hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+    BarcodeFormat.QR_CODE,
+    BarcodeFormat.CODE_128,
+    BarcodeFormat.EAN_13,
+    BarcodeFormat.EAN_8,
+    BarcodeFormat.CODE_39,
+    BarcodeFormat.UPC_A,
+    BarcodeFormat.UPC_E,
+    BarcodeFormat.DATA_MATRIX,
+    BarcodeFormat.AZTEC,
+    BarcodeFormat.PDF_417,
+    BarcodeFormat.ITF,
+  ]);
+  const reader = new MultiFormatReader();
+
+  // Phase 2a: Sharp preprocessing × rotations (1× scale)
+  for (const pp of preprocessors) {
+    for (const deg of rotations) {
       try {
-        const pipeline = pp.fn(sharp(inputBuf));
-        if (deg !== 0) pipeline.rotate(deg);
+        let pipeline = pp.fn(sharp(buffer));
+        if (deg !== 0) pipeline = pipeline.rotate(deg);
 
-        const result = await tryDecode(pipeline);
-        if (result) {
-          console.log(`[scanner] Decoded (phase 2, ${pp.label}, ${deg}°): ${result.text}`);
-          return result;
+        const { data, info } = await pipeline.greyscale().raw()
+          .toBuffer({ resolveWithObject: true });
+
+        // Try ZBar first (faster, more robust for 1D barcodes)
+        const zbarResults = await scanGrayBuffer(
+          new Uint8Array(data).buffer, info.width, info.height
+        );
+        if (zbarResults.length > 0) {
+          const decoded = zbarResults[0].decode();
+          console.log(`[fallback] ZBar decoded (${pp.label}, ${deg}°): ${decoded}`);
+          return { text: decoded, format: zbarResults[0].typeName };
+        }
+
+        // Try ZXing with grayscale buffer
+        const gray = new Uint8ClampedArray(data);
+        const src = new GrayLuminanceSource(gray, info.width, info.height);
+        for (const makeBitmap of [
+          () => new BinaryBitmap(new HybridBinarizer(src)),
+          () => new BinaryBitmap(new GlobalHistogramBinarizer(src)),
+          () => new BinaryBitmap(new HybridBinarizer(src.invert())),
+          () => new BinaryBitmap(new GlobalHistogramBinarizer(src.invert())),
+        ]) {
+          try {
+            const result = reader.decode(makeBitmap(), hints);
+            const text = result.getText();
+            console.log(`[fallback] ZXing decoded (${pp.label}, ${deg}°): ${text}`);
+            return { text, format: BarcodeFormat[result.getBarcodeFormat()] };
+          } catch (_) {}
         }
       } catch (_) {}
     }
   }
 
-  // ── Phase 3: Upscaled image × preprocessors × rotations ──
+  // Phase 2b: Upscaled image × preprocessors × rotations
   for (const scaleFactor of [2, 3]) {
-    for (const pp of PREPROCESS_STRATEGIES) {
-      for (const deg of ROTATIONS) {
+    for (const pp of preprocessors) {
+      for (const deg of rotations) {
         try {
-          let pipeline = sharp(inputBuf)
+          let pipeline = sharp(buffer)
             .resize({ width: Math.round(w * scaleFactor), kernel: 'lanczos3' });
           if (deg !== 0) pipeline = pipeline.rotate(deg);
           pipeline = pp.fn(pipeline);
 
-          const result = await tryDecode(pipeline);
-          if (result) {
-            console.log(`[scanner] Decoded (phase 3, ${scaleFactor}×, ${pp.label}, ${deg}°): ${result.text}`);
-            return result;
+          const { data, info } = await pipeline.greyscale().raw()
+            .toBuffer({ resolveWithObject: true });
+
+          // Try ZBar
+          const zbarResults = await scanGrayBuffer(
+            new Uint8Array(data).buffer, info.width, info.height
+          );
+          if (zbarResults.length > 0) {
+            const decoded = zbarResults[0].decode();
+            console.log(`[fallback] ZBar decoded (${scaleFactor}×, ${pp.label}, ${deg}°): ${decoded}`);
+            return { text: decoded, format: zbarResults[0].typeName };
+          }
+
+          // Try ZXing
+          const gray = new Uint8ClampedArray(data);
+          const src = new GrayLuminanceSource(gray, info.width, info.height);
+          for (const makeBitmap of [
+            () => new BinaryBitmap(new HybridBinarizer(src)),
+            () => new BinaryBitmap(new GlobalHistogramBinarizer(src)),
+          ]) {
+            try {
+              const result = reader.decode(makeBitmap(), hints);
+              const text = result.getText();
+              console.log(`[fallback] ZXing decoded (${scaleFactor}×, ${pp.label}, ${deg}°): ${text}`);
+              return { text, format: BarcodeFormat[result.getBarcodeFormat()] };
+            } catch (_) {}
           }
         } catch (_) {}
       }
     }
   }
 
-  throw new Error('Could not decode barcode using any strategy.');
+  return null;
+}
+
+// ─── Main scan function ─────────────────────────────────────────────────
+
+/**
+ * Scans a barcode/QR code from an image buffer.
+ *
+ * Uses a multi-strategy pipeline to maximize decode success:
+ *
+ * **Phase 1** (Jimp + ZXing) – Fast path for simple images:
+ * 1. Multiple image preprocessing variants (original, greyscale, high contrast, combined)
+ * 2. Multiple rotation angles (0°, 90°, 180°, 270°) for rotated barcodes
+ * 3. Multiple binarizer strategies (Hybrid, GlobalHistogram)
+ * 4. Inverted luminance for each combination
+ *
+ * **Phase 2** (Sharp + ZBar/ZXing) – Fallback for difficult images:
+ * 1. Advanced preprocessing (normalize, sharpen, CLAHE, high contrast)
+ * 2. ZBar-WASM engine (more robust for distorted 1D barcodes)
+ * 3. Upscaled versions (2×, 3×) for low-resolution images
+ *
+ * Short-circuits on the first successful decode.
+ */
+export async function scanImage(buffer: Buffer): Promise<ScanResult> {
+  // ── Phase 1: Jimp + ZXing (fast path) ──
+  const img = await Jimp.read(buffer);
+
+  const hints = new Map();
+  hints.set(DecodeHintType.TRY_HARDER, true);
+  hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+    BarcodeFormat.QR_CODE,
+    BarcodeFormat.CODE_128,
+    BarcodeFormat.EAN_13,
+    BarcodeFormat.EAN_8,
+    BarcodeFormat.CODE_39,
+    BarcodeFormat.UPC_A,
+    BarcodeFormat.UPC_E,
+    BarcodeFormat.DATA_MATRIX,
+    BarcodeFormat.AZTEC,
+    BarcodeFormat.PDF_417,
+    BarcodeFormat.ITF
+  ]);
+
+  const reader = new MultiFormatReader();
+  const rotations = [0, 90, 180, 270];
+
+  // Create preprocessed image variants
+  const variants = createImageVariants(img);
+
+  // Try each variant × rotation × binarizer combination
+  for (const variant of variants) {
+    for (const deg of rotations) {
+      const rotatedImg = variant.image.clone();
+      if (deg !== 0) {
+        rotatedImg.rotate(deg);
+      }
+
+      const result = tryDecodeImage(rotatedImg, reader, hints);
+      if (result) {
+        console.log(`Decoded with strategy: ${variant.label}, rotation: ${deg}°`);
+        return {
+          text: result.getText(),
+          format: BarcodeFormat[result.getBarcodeFormat()]
+        };
+      }
+    }
+  }
+
+  // ── Phase 2: Sharp + ZBar-WASM fallback (for difficult images) ──
+  console.log('[scanner] Phase 1 failed, trying sharp + zbar fallback...');
+  const fallbackResult = await scanWithSharpFallback(buffer);
+  if (fallbackResult) {
+    return fallbackResult;
+  }
+
+  throw new Error("Could not decode barcode using any strategy.");
 }
