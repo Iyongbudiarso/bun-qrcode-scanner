@@ -108,6 +108,7 @@ export async function extractTextFromImage(
   await worker.setParameters({
     tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
     tessedit_char_whitelist: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    user_defined_dpi: "96",
   });
 
   const { data: { text } } = await worker.recognize(cleanedBuffer);
