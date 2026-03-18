@@ -105,7 +105,6 @@ export async function extractTextFromImage(
   }).png().toBuffer();
 
   const worker = await Tesseract.createWorker("eng", 1, {
-    workerPath: "https://unpkg.com/tesseract.js@7.0.0/dist/worker.min.js",
     corePath: "https://unpkg.com/tesseract.js-core@7.0.0/tesseract-core.wasm.js",
     logger: m => console.log(m),
   });
