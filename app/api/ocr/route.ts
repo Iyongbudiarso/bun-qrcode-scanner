@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
 
     const result = await extractTextFromImage(imageBuffer);
 
-    return NextResponse.json(result);
+    return NextResponse.json({ output: result });
   } catch (error) {
     console.error("OCR error:", error);
     return NextResponse.json(
