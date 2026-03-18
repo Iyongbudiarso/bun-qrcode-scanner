@@ -20,9 +20,9 @@ export async function POST(req: NextRequest) {
     // Decode base64 to a raw image buffer
     const imageBuffer = Buffer.from(base64, "base64");
 
-    const text = await extractTextFromImage(imageBuffer);
+    const result = await extractTextFromImage(imageBuffer);
 
-    return NextResponse.json({ text });
+    return NextResponse.json(result);
   } catch (error) {
     console.error("OCR error:", error);
     return NextResponse.json(

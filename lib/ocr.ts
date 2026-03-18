@@ -14,7 +14,7 @@ import Tesseract from "tesseract.js";
  */
 export async function extractTextFromImage(
   imageBuffer: Buffer,
-): Promise<string> {
+): Promise<{ text: string; debugBase64: string }> {
   // --- Step 1: Grayscale + binarize ---
   const { data: rawData, info } = await sharp(imageBuffer)
     .flatten({ background: '#ffffff' })
@@ -81,21 +81,21 @@ export async function extractTextFromImage(
 
     if (isLine || isBorder) {
       // Instead of erasing the whole blob, selectively erase pixels that look like horizontal lines
-      for (const [x, y] of blob) {
+        for (const [x, y] of blob) {
         let hasVertical = false;
         // Check vertical neighbors within +/- 5 pixels
         for (let dy = -5; dy <= 5; dy++) {
-          if (dy === 0) continue;
-          const ny = y + dy;
+              if (dy === 0) continue;
+              const ny = y + dy;
           if (ny >= 0 && ny < height && getPixel(x, ny) === 0) {
             hasVertical = true;
             break;
           }
-        }
+            }
         if (!hasVertical) {
-          setPixel(x, y, 255);
+              setPixel(x, y, 255);
+          }
         }
-      }
     }
   }
 
@@ -103,6 +103,8 @@ export async function extractTextFromImage(
   const cleanedBuffer = await sharp(Buffer.from(pixels), {
     raw: { width, height, channels: 1 },
   }).png().toBuffer();
+
+  const debugBase64 = cleanedBuffer.toString("base64");
 
   const worker = await Tesseract.createWorker("eng");
   await worker.setParameters({
@@ -113,5 +115,9 @@ export async function extractTextFromImage(
 
   const { data: { text } } = await worker.recognize(cleanedBuffer);
   await worker.terminate();
-  return text.replace(/\s+/g, "").toLowerCase();
+
+  return {
+    text: text.replace(/\s+/g, "").toLowerCase(),
+    debugBase64,
+  };
 }
