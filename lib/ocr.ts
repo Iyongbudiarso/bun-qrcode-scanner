@@ -104,10 +104,7 @@ export async function extractTextFromImage(
     raw: { width, height, channels: 1 },
   }).png().toBuffer();
 
-  const worker = await Tesseract.createWorker("eng", 1, {
-    corePath: "https://unpkg.com/tesseract.js-core@7.0.0/tesseract-core.wasm.js",
-    logger: m => console.log(m),
-  });
+  const worker = await Tesseract.createWorker("eng");
   await worker.setParameters({
     tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
     tessedit_char_whitelist: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
