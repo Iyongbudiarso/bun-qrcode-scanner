@@ -104,8 +104,6 @@ export async function extractTextFromImage(
     raw: { width, height, channels: 1 },
   }).png().toBuffer();
 
-  await sharp(cleanedBuffer).toFile("preprocessed.png");
-
   const worker = await Tesseract.createWorker("eng");
   await worker.setParameters({
     tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
